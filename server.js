@@ -3,12 +3,13 @@ const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 3001;
 
+// { socketId: { peerId, ws, busy } }
 const pool = new Map();
 let nextSocketId = 1;
 
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain', 'Access-Control-Allow-Origin': '*' });
-  res.end('SwipeLive server ok — users online: ' + pool.size);
+  res.end('SwipeLive ok — online: ' + pool.size);
 });
 
 const wss = new WebSocketServer({ server });
@@ -26,28 +27,64 @@ wss.on('connection', ws => {
     try { msg = JSON.parse(raw); } catch { return; }
 
     switch (msg.type) {
+
       case 'join': {
         myPeerId = msg.peerId;
-        pool.set(socketId, { peerId: myPeerId, ws, connectedAt: Date.now() });
+        pool.set(socketId, { peerId: myPeerId, ws, busy: false });
+        console.log(`+ join [${socketId}] ${myPeerId} | pool=${pool.size}`);
         broadcastCount();
         send({ type: 'joined', socketId });
         break;
       }
+
+      // Marca como ocupado quando conectou com alguém
+      case 'busy': {
+        const me = pool.get(socketId);
+        if (me) me.busy = true;
+        break;
+      }
+
+      // Marca como livre quando desconectou
+      case 'free': {
+        const me = pool.get(socketId);
+        if (me) me.busy = false;
+        break;
+      }
+
       case 'next': {
-        const exclude = msg.exclude || [];
-        exclude.push(myPeerId);
-        const candidates = [...pool.values()].filter(u => !exclude.includes(u.peerId));
-        if (candidates.length === 0) { send({ type: 'no_one' }); break; }
+        // Só candidatos que estão LIVRES (não ocupados)
+        const candidates = [...pool.values()].filter(u =>
+          u.peerId !== myPeerId && !u.busy
+        );
+
+        if (candidates.length === 0) {
+          send({ type: 'no_one' });
+          break;
+        }
+
         const pick = candidates[Math.floor(Math.random() * candidates.length)];
+        console.log(`  next [${socketId}] → ${pick.peerId}`);
         send({ type: 'peer', peerId: pick.peerId });
         break;
       }
-      case 'ping': { send({ type: 'pong' }); break; }
+
+      case 'ping': {
+        send({ type: 'pong' });
+        break;
+      }
     }
   });
 
-  ws.on('close', () => { pool.delete(socketId); broadcastCount(); });
-  ws.on('error', () => { pool.delete(socketId); broadcastCount(); });
+  ws.on('close', () => {
+    pool.delete(socketId);
+    console.log(`- leave [${socketId}] ${myPeerId} | pool=${pool.size}`);
+    broadcastCount();
+  });
+
+  ws.on('error', () => {
+    pool.delete(socketId);
+    broadcastCount();
+  });
 });
 
 function broadcastCount() {
